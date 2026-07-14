@@ -84,7 +84,6 @@ if menu == "Kasir":
     # Kolom Input Transaksi
     col1, col2 = st.columns(2)
     with col1:
-        # Jika ada produk dari pencarian barcode otomatis diisi, jika tidak pilih manual
         daftar_nama_produk = st.session_state.produk['Nama Barang'].tolist()
         idx_default = daftar_nama_produk.index(selected_product['Nama Barang']) if selected_product is not None else 0
         
@@ -104,14 +103,15 @@ if menu == "Kasir":
         if jumlah_beli is not None:
             if jumlah_beli <= data_produk['Stok']:
                 potongan = potongan_harga if potongan_harga is not None else 0
-                subtotal = (data_produk['Harga Satuan'] * jumlah_beli) - potongan
+                calc_subtotal = (data_produk['Harga Satuan'] * jumlah_beli) - potongan
                 
+                # Menggunakan nama kolom huruf kecil (barang, harga, jumlah, subtotal, potongan) agar tidak KeyError
                 st.session_state.keranjang.append({
-                    "Nama Barang": data_produk['Nama Barang'],
-                    "Harga Satuan": data_produk['Harga Satuan'],
-                    "Jumlah": jumlah_beli,
-                    "Potongan": potongan,
-                    "Subtotal": subtotal
+                    "barang": data_produk['Nama Barang'],
+                    "harga": data_produk['Harga Satuan'],
+                    "jumlah": jumlah_beli,
+                    "potongan": potongan,
+                    "subtotal": calc_subtotal
                 })
                 st.success(f"{data_produk['Nama Barang']} berhasil dimasukkan!")
                 st.rerun()
@@ -126,7 +126,8 @@ if menu == "Kasir":
         df_keranjang = pd.DataFrame(st.session_state.keranjang)
         st.dataframe(df_keranjang, use_container_width=True)
         
-        total_belanja = df_keranjang['Subtotal'].sum()
+        # Menggunakan kolom 'subtotal' huruf kecil
+        total_belanja = df_keranjang['subtotal'].sum()
         st.markdown(f"### **TOTAL HARGA: Rp {total_belanja:,}**")
         
         if st.button("Kosongkan Keranjang"):
@@ -139,7 +140,6 @@ if menu == "Kasir":
             if kembalian >= 0:
                 st.success(f"Pembayaran Valid. Kembalian: Rp {kembalian:,}")
                 
-                # Pembuatan teks struk rapi rata kiri-kanan
                 garis = "--------------------------------"
                 waktu_skrg = datetime.now().strftime("%Y-%m-%d %H:%M")
                 
@@ -148,12 +148,12 @@ if menu == "Kasir":
                 struk_teks += f"{garis}\n"
                 
                 for item in st.session_state.keranjang:
-                    nama = item['Nama Barang'][:15]
-                    qty_harga = f"{item['Jumlah']}x{item['Harga Satuan']:,}"
-                    sub = f"Rp{item['Subtotal']:,}"
+                    nama = item['barang'][:15]
+                    qty_harga = f"{item['jumlah']}x{item['harga']:,}"
+                    sub = f"Rp{item['subtotal']:,}"
                     spasi1 = " " * (32 - len(nama) - len(sub))
                     struk_teks += f"{nama}{spasi1}{sub}\n"
-                    struk_teks += f"  Diskon: Rp{item['Potongan']:,}\n"
+                    struk_teks += f"  Diskon: Rp{item['potongan']:,}\n"
                     
                 struk_teks += f"{garis}\n"
                 tot_str = f"Rp{total_belanja:,}"
@@ -224,14 +224,11 @@ elif menu == "Kelola Barang":
         
     if st.button("Simpan ke Gudang"):
         if barcode_baru and nama_baru and harga_jual_satuan is not None and jumlah_stok_masuk is not None:
-            # Cek apakah kode barang sudah terdaftar
             if barcode_baru in st.session_state.produk['Barcode/ID'].values:
-                # Update stok jika barcode sudah ada
                 idx = st.session_state.produk[st.session_state.produk['Barcode/ID'] == barcode_baru].index[0]
                 st.session_state.produk.at[idx, 'Stok'] += jumlah_stok_masuk
                 st.success(f"Stok produk {nama_baru} berhasil ditambah!")
             else:
-                # Tambah produk baru jika barcode belum ada
                 baru = pd.DataFrame([{"Barcode/ID": barcode_baru, "Nama Barang": nama_baru, "Harga Satuan": harga_jual_satuan, "Stok": jumlah_stok_masuk}])
                 st.session_state.produk = pd.concat([st.session_state.produk, baru], ignore_index=True)
                 st.success(f"Produk baru '{nama_baru}' berhasil didaftarkan!")
@@ -262,7 +259,6 @@ elif menu == "Koreksi Stok":
     if st.button("Terapkan Koreksi"):
         idx = st.session_state.produk[st.session_state.produk['Nama Barang'] == pilih_koreksi].index[0]
         
-        # Eksekusi update jika kasir memasukkan nominal baru
         if harga_satuan_baru is not None:
             st.session_state.produk.at[idx, 'Harga Satuan'] = harga_satuan_baru
         if koreksi_jumlah_stok is not None:
