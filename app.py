@@ -14,8 +14,9 @@ st.set_page_config(
 @st.cache_resource
 def init_supabase() -> Client:
     try:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
+        # Membersihkan spasi atau path '/rest/v1/' yang tidak sengaja terbaca
+        url = st.secrets["SUPABASE_URL"].strip().replace("/rest/v1/", "").replace("/rest/v1", "")
+        key = st.secrets["SUPABASE_KEY"].strip()
         return create_client(url, key)
     except Exception as e:
         st.error("Gagal terhubung ke database. Pastikan Secrets 'SUPABASE_URL' dan 'SUPABASE_KEY' sudah diisi di Streamlit Cloud!")
