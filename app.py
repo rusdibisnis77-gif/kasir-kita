@@ -1,268 +1,434 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from supabase import create_client, Client
+import datetime
 
-# ==========================================
-# 1. KONFIGURASI HALAMAN & STYLE CSS (TAMPILAN BERSIH)
-# ==========================================
-st.set_page_config(page_title="Aplikasi Kasir Digital", layout="wide")
-
-# Trik CSS untuk menyembunyikan tombol + dan - serta merapikan input angka
-st.markdown(
-    """
-    <style>
-    /* Menghilangkan tombol plus minus (+ / -) bawaan Streamlit */
-    button[title="Incriment/Decrement values"], 
-    button[data-testid="stNumberInputStepUp"], 
-    button[data-testid="stNumberInputStepDown"] {
-        display: none !important;
-    }
-    /* Memastikan tampilan kolom tetap rapi setelah tombol hilang */
-    div[data-testid="stNumberInputContainer"] {
-        padding-right: 10px !important;
-    }
-    /* Desain Struk Thermal */
-    .struk-container {
-        font-family: 'Courier New', Courier, monospace;
-        background-color: #ffffff;
-        color: #000000;
-        padding: 20px;
-        border: 1px solid #ccc;
-        max-width: 400px;
-        margin: 0 auto;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
+# --- KONFIGURASI HALAMAN ---
+st.set_page_config(
+    page_title="Kasir Kita - Aplikasi Kasir Toko Online",
+    page_icon="🛍️",
+    layout="wide"
 )
 
-# ==========================================
-# 2. INISIALISASI DATABASE SIMPEL (SESSION STATE)
-# ==========================================
-if 'produk' not in st.session_state:
-    st.session_state.produk = pd.DataFrame([
-        {"Barcode/ID": "8991001", "Nama Barang": "Minyak Goreng 1L", "Harga Satuan": 18000, "Stok": 20},
-        {"Barcode/ID": "8991002", "Nama Barang": "Gula Pasir 1kg", "Harga Satuan": 15000, "Stok": 15},
-        {"Barcode/ID": "8991003", "Nama Barang": "Beras Premium 5kg", "Harga Satuan": 75000, "Stok": 10}
-    ])
+# --- KONEKSI SUPABASE ---
+@st.cache_resource
+def init_supabase() -> Client:
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception as e:
+        st.error("Gagal terhubung ke database. Pastikan Secrets 'SUPABASE_URL' dan 'SUPABASE_KEY' sudah diisi di Streamlit Cloud!")
+        st.stop()
 
-if 'keranjang' not in st.session_state:
-    st.session_state.keranjang = []
+supabase = init_supabase()
 
-if 'utang' not in st.session_state:
-    st.session_state.utang = pd.DataFrame([
-        {"Nama Pelanggan": "Budi", "Sisa Utang": 50000, "Tanggal Utang": "2026-07-10"}
-    ])
+# --- STATE MANAGMENT ---
+if "user_session" not in st.session_state:
+    st.session_state.user_session = None  # Menyimpan data user yang login (id, nama_toko, username)
+if "keranjang" not in st.session_state:
+    st.session_state.keranjang = []  # Menyimpan barang belanjaan sementara
 
-# ==========================================
-# 3. NAVIGASI MENU UTAMA
-# ==========================================
-menu = st.sidebar.radio("PILIH MENU", ["Kasir", "Pelunasan Utang", "Kelola Barang", "Koreksi Stok"])
+# --- FUNGSI DATABASE ---
+def daftar_user(username, password, nama_toko):
+    try:
+        # Cek apakah username sudah terdaftar
+        res = supabase.table("users").select("*").eq("username", username).execute()
+        if len(res.data) > 0:
+            return False, "Username sudah digunakan oleh toko lain!"
+        
+        # Simpan user baru
+        data = {
+            "username": username,
+            "password": password,  # Pada sistem produksi sangat disarankan menggunakan hashing password
+            "nama_toko": nama_toko
+        }
+        supabase.table("users").insert(data).execute()
+        return True, "Akun Toko berhasil didaftarkan! Silakan masuk."
+    except Exception as e:
+        return False, f"Terjadi kesalahan: {str(e)}"
 
-# ==========================================
-# MENU 1: KASIR
-# ==========================================
-if menu == "Kasir":
-    st.title("🛒 Menu Kasir (Transaksi)")
-    
-    # Fitur Simulasi Barcode / Pencarian Kilat Keyboard
-    search_query = st.text_input("Simulasi Barcode / Cari Nama Produk (Ketik lalu tekan Enter)", key="search_barcode")
-    
-    selected_product = None
-    if search_query:
-        # Cari berdasarkan kecocokan ID/Barcode atau Nama Barang
-        df_res = st.session_state.produk[
-            st.session_state.produk['Barcode/ID'].str.contains(search_query, case=False) | 
-            st.session_state.produk['Nama Barang'].str.contains(search_query, case=False)
-        ]
-        if not df_res.empty:
-            selected_product = df_res.iloc[0]
-            st.success(f"Terpilih otomatis: {selected_product['Nama Barang']} (Rp {selected_product['Harga Satuan']:,})")
+def login_user(username, password):
+    try:
+        res = supabase.table("users").select("*").eq("username", username).eq("password", password).execute()
+        if len(res.data) == 1:
+            return True, res.data[0]
+        return False, "Username atau Password salah!"
+    except Exception as e:
+        return False, f"Terjadi kesalahan: {str(e)}"
+
+def ambil_produk(user_id):
+    try:
+        res = supabase.table("produk").select("*").eq("user_id", user_id).order("nama_produk").execute()
+        return res.data
+    except:
+        return []
+
+def tambah_produk(user_id, nama, harga, stok, kode=""):
+    try:
+        data = {
+            "user_id": user_id,
+            "nama_produk": nama,
+            "harga": int(harga),
+            "stok": int(stok),
+            "kode_produk": kode
+        }
+        supabase.table("produk").insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Gagal menambah produk: {str(e)}")
+        return False
+
+def update_stok(produk_id, stok_baru):
+    try:
+        supabase.table("produk").update({"stok": int(stok_baru)}).eq("id", produk_id).execute()
+    except Exception as e:
+        st.error(f"Gagal memperbarui stok: {str(e)}")
+
+def hapus_produk(produk_id):
+    try:
+        supabase.table("produk").delete().eq("id", produk_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"Gagal menghapus produk: {str(e)}")
+        return False
+
+def ambil_utang(user_id):
+    try:
+        res = supabase.table("utang").select("*").eq("user_id", user_id).order("id", desc=True).execute()
+        return res.data
+    except:
+        return []
+
+def tambah_utang(user_id, nama_pelanggan, sisa_utang):
+    try:
+        data = {
+            "user_id": user_id,
+            "nama_pelanggan": nama_pelanggan,
+            "sisa_utang": int(sisa_utang)
+        }
+        supabase.table("utang").insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Gagal mencatat utang: {str(e)}")
+        return False
+
+def bayar_utang_db(utang_id, nominal_bayar, sisa_sebelumnya):
+    try:
+        sisa_baru = max(0, sisa_sebelumnya - nominal_bayar)
+        if sisa_baru == 0:
+            supabase.table("utang").delete().eq("id", utang_id).execute()
         else:
-            st.warning("Produk tidak ditemukan.")
+            supabase.table("utang").update({"sisa_utang": sisa_baru}).eq("id", utang_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"Gagal memperbarui utang: {str(e)}")
+        return False
 
-    # Kolom Input Transaksi
-    col1, col2 = st.columns(2)
-    with col1:
-        daftar_nama_produk = st.session_state.produk['Nama Barang'].tolist()
-        idx_default = daftar_nama_produk.index(selected_product['Nama Barang']) if selected_product is not None else 0
+
+# =========================================================================
+# --- HALAMAN AUTENTIKASI (LOGIN & DAFTAR) ---
+# =========================================================================
+if st.session_state.user_session is None:
+    st.markdown("<h1 style='text-align: center; color: #2E7D32;'>🛍️ Kasir Kita</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; font-size: 1.2rem; color: #555;'>Sistem Kasir Online Toko Anda Aman & Tersimpan di Cloud</p>", unsafe_allow_html=True)
+    
+    tab_login, tab_daftar = st.tabs(["🔐 Masuk Akun", "📝 Daftar Akun Baru"])
+    
+    with tab_login:
+        st.subheader("Silakan Masuk ke Toko Anda")
+        login_username = st.text_input("Username", key="l_username")
+        login_password = st.text_input("Password", type="password", key="l_password")
         
-        produk_pilihan = st.selectbox("Pilih Produk Manual", daftar_nama_produk, index=idx_default)
-        data_produk = st.session_state.produk[st.session_state.produk['Nama Barang'] == produk_pilihan].iloc[0]
-        
-        # Kolom input Jumlah Beli (Nol otomatis hilang & tanda +/- hilang)
-        jumlah_beli = st.number_input("Jumlah beli", min_value=1, value=None, placeholder="Masukkan jumlah...")
-
-    with col2:
-        # Potongan Harga & Uang Tunai (Nol otomatis hilang & tanda +/- hilang)
-        potongan_harga = st.number_input("Potongan harga (Rp)", min_value=0, value=None, placeholder="0")
-        uang_tunai = st.number_input("Uang tunai / Nominal Bayar (Rp)", min_value=0, value=None, placeholder="0")
-
-    # Tombol Tambah ke Keranjang
-    if st.button("Tambah ke Keranjang"):
-        if jumlah_beli is not None:
-            if jumlah_beli <= data_produk['Stok']:
-                potongan = potongan_harga if potongan_harga is not None else 0
-                calc_subtotal = (data_produk['Harga Satuan'] * jumlah_beli) - potongan
-                
-                # Menggunakan nama kolom huruf kecil (barang, harga, jumlah, subtotal, potongan) agar tidak KeyError
-                st.session_state.keranjang.append({
-                    "barang": data_produk['Nama Barang'],
-                    "harga": data_produk['Harga Satuan'],
-                    "jumlah": jumlah_beli,
-                    "potongan": potongan,
-                    "subtotal": calc_subtotal
-                })
-                st.success(f"{data_produk['Nama Barang']} berhasil dimasukkan!")
-                st.rerun()
+        if st.button("Masuk Sekarang", use_container_width=True, type="primary"):
+            if login_username and login_password:
+                success, response = login_user(login_username, login_password)
+                if success:
+                    st.session_state.user_session = response
+                    st.success(f"Selamat Datang Kembali di {response['nama_toko']}! 🎉")
+                    st.rerun()
+                else:
+                    st.error(response)
             else:
-                st.error("Stok barang di gudang tidak mencukupi!")
-        else:
-            st.warning("Masukkan jumlah beli terlebih dahulu.")
+                st.warning("Mohon isi semua kolom login!")
 
-    # Tabel Keranjang Belanjaan
-    if st.session_state.keranjang:
-        st.subheader("🛒 Daftar Belanja")
-        df_keranjang = pd.DataFrame(st.session_state.keranjang)
-        st.dataframe(df_keranjang, use_container_width=True)
+    with tab_daftar:
+        st.subheader("Daftarkan Toko Baru Anda")
+        reg_nama_toko = st.text_input("Nama Toko / Bisnis", placeholder="Contoh: Toko Berkah Mandiri")
+        reg_username = st.text_input("Username Baru (Tanpa Spasi)", placeholder="Contoh: tokoberkah")
+        reg_password = st.text_input("Password Baru", type="password")
         
-        # Menggunakan kolom 'subtotal' huruf kecil
-        total_belanja = df_keranjang['subtotal'].sum()
-        st.markdown(f"### **TOTAL HARGA: Rp {total_belanja:,}**")
+        if st.button("Daftar Sekarang", use_container_width=True):
+            if reg_nama_toko and reg_username and reg_password:
+                if " " in reg_username:
+                    st.error("Username tidak boleh mengandung spasi!")
+                else:
+                    success, message = daftar_user(reg_username, reg_password, reg_nama_toko)
+                    if success:
+                        st.success(message)
+                    else:
+                        st.error(message)
+            else:
+                st.warning("Mohon isi semua data pendaftaran!")
+
+
+# =========================================================================
+# --- HALAMAN UTAMA APLIKASI (JIKA SUDAH LOGIN) ---
+# =========================================================================
+else:
+    user = st.session_state.user_session
+    
+    # --- Sidebar Navigasi & Info Toko ---
+    with st.sidebar:
+        st.markdown(f"### 🏪 {user['nama_toko']}")
+        st.write(f"Logged in as: **@{user['username']}**")
+        st.markdown("---")
         
-        if st.button("Kosongkan Keranjang"):
+        menu = st.radio(
+            "Navigasi Menu:",
+            ["🛒 Kasir Penjualan", "📦 Kelola Produk", "💸 Catatan Utang / Kasbon"]
+        )
+        
+        st.markdown("---")
+        if st.button("🚪 Keluar Akun (Logout)", use_container_width=True, type="secondary"):
+            st.session_state.user_session = None
             st.session_state.keranjang = []
             st.rerun()
-            
-        # Proses Pembayaran & Cetak Struk Format WhatsApp / Thermal Rata Kiri-Kanan
-        if uang_tunai is not None:
-            kembalian = uang_tunai - total_belanja
-            if kembalian >= 0:
-                st.success(f"Pembayaran Valid. Kembalian: Rp {kembalian:,}")
-                
-                garis = "--------------------------------"
-                waktu_skrg = datetime.now().strftime("%Y-%m-%d %H:%M")
-                
-                struk_teks = f"        TOKO MANUNGGAL        \n"
-                struk_teks += f"      {waktu_skrg}      \n"
-                struk_teks += f"{garis}\n"
-                
-                for item in st.session_state.keranjang:
-                    nama = item['barang'][:15]
-                    qty_harga = f"{item['jumlah']}x{item['harga']:,}"
-                    sub = f"Rp{item['subtotal']:,}"
-                    spasi1 = " " * (32 - len(nama) - len(sub))
-                    struk_teks += f"{nama}{spasi1}{sub}\n"
-                    struk_teks += f"  Diskon: Rp{item['potongan']:,}\n"
-                    
-                struk_teks += f"{garis}\n"
-                tot_str = f"Rp{total_belanja:,}"
-                spasi_tot = " " * (32 - 13 - len(tot_str))
-                struk_teks += f"TOTAL BELANJA{spasi_tot}{tot_str}\n"
-                
-                tun_str = f"Rp{uang_tunai:,}"
-                spasi_tun = " " * (32 - 10 - len(tun_str))
-                struk_teks += f"TUNAI/BAYAR{spasi_tun}{tun_str}\n"
-                
-                kem_str = f"Rp{kembalian:,}"
-                spasi_kem = " " * (32 - 9 - len(kem_str))
-                struk_teks += f"KEMBALIAN{spasi_kem}{kem_str}\n"
-                struk_teks += f"{garis}\n"
-                struk_teks += f"   Terima Kasih Atas Kunjungan   \n"
-                struk_teks += f"            Anda!               "
-                
-                st.subheader("📄 Salin Nota / Cetak Struk")
-                st.text_area("Salin teks di bawah ini untuk dikirim ke WhatsApp atau dicetak ke Printer Thermal:", value=struk_teks, height=350)
-            else:
-                st.error(f"Uang tunai kurang sebesar: Rp {abs(kembalian):,}")
 
-# ==========================================
-# MENU 2: PELUNASAN UTANG
-# ==========================================
-elif menu == "Pelunasan Utang":
-    st.title("🤝 Menu Pelunasan Utang Pelanggan")
-    st.dataframe(st.session_state.utang, use_container_width=True)
-    
-    if not st.session_state.utang.empty:
-        pelanggan_list = st.session_state.utang['Nama Pelanggan'].tolist()
-        pilih_pelanggan = st.selectbox("Pilih nama pelanggan yang bayar utang", pelanggan_list)
+    # --- MENU 1: KASIR PENJUALAN ---
+    if menu == "🛒 Kasir Penjualan":
+        st.title("🛒 Kasir Penjualan")
+        st.write("Kelola transaksi pembelian pelanggan dengan mudah secara langsung.")
         
-        # Input Nominal Pembayaran (Nol otomatis hilang & tanda +/- hilang)
-        nominal_pembayaran = st.number_input("Nominal pembayaran utang (Rp)", min_value=0, value=None, placeholder="0")
+        daftar_barang = ambil_produk(user["id"])
         
-        if st.button("Proses Bayar Utang"):
-            if nominal_pembayaran is not None and nominal_pembayaran > 0:
-                idx = st.session_state.utang[st.session_state.utang['Nama Pelanggan'] == pilih_pelanggan].index[0]
-                sisa = st.session_state.utang.at[idx, 'Sisa Utang'] - nominal_pembayaran
-                
-                if sisa <= 0:
-                    st.success(f"Utang atas nama {pilih_pelanggan} LUNAS!")
-                    st.session_state.utang = st.session_state.utang.drop(idx).reset_index(drop=True)
-                else:
-                    st.session_state.utang.at[idx, 'Sisa Utang'] = sisa
-                    st.success(f"Pembayaran berhasil dimasukkan. Sisa utang {pilih_pelanggan} sekarang: Rp {sisa:,}")
-                st.rerun()
-            else:
-                st.warning("Masukkan nominal pembayaran utang valid.")
-
-# ==========================================
-# MENU 3: KELOLA BARANG
-# ==========================================
-elif menu == "Kelola Barang":
-    st.title("📦 Kelola Barang & Tambah Produk Baru")
-    st.dataframe(st.session_state.produk, use_container_width=True)
-    
-    st.subheader("➕ Daftarkan Produk Baru / Tambah Stok")
-    col1, col2 = st.columns(2)
-    with col1:
-        barcode_baru = st.text_input("Barcode / ID Produk Baru")
-        nama_baru = st.text_input("Nama barang / produk")
-    with col2:
-        # Harga Jual Satuan & Jumlah Stok Masuk (Nol otomatis hilang & tanda +/- hilang)
-        harga_jual_satuan = st.number_input("Harga jual satuan (Rp)", min_value=0, value=None, placeholder="0")
-        jumlah_stok_masuk = st.number_input("Jumlah stok masuk", min_value=1, value=None, placeholder="0")
-        
-    if st.button("Simpan ke Gudang"):
-        if barcode_baru and nama_baru and harga_jual_satuan is not None and jumlah_stok_masuk is not None:
-            if barcode_baru in st.session_state.produk['Barcode/ID'].values:
-                idx = st.session_state.produk[st.session_state.produk['Barcode/ID'] == barcode_baru].index[0]
-                st.session_state.produk.at[idx, 'Stok'] += jumlah_stok_masuk
-                st.success(f"Stok produk {nama_baru} berhasil ditambah!")
-            else:
-                baru = pd.DataFrame([{"Barcode/ID": barcode_baru, "Nama Barang": nama_baru, "Harga Satuan": harga_jual_satuan, "Stok": jumlah_stok_masuk}])
-                st.session_state.produk = pd.concat([st.session_state.produk, baru], ignore_index=True)
-                st.success(f"Produk baru '{nama_baru}' berhasil didaftarkan!")
-            st.rerun()
+        if not daftar_barang:
+            st.info("Produk Anda masih kosong. Silakan masuk ke menu **📦 Kelola Produk** untuk menambahkan produk jualan Anda terlebih dahulu!")
         else:
-            st.error("Gagal menyimpan, mohon lengkapi semua data input di atas.")
-
-# ==========================================
-# MENU 4: KOREKSI STOK
-# ==========================================
-elif menu == "Koreksi Stok":
-    st.title("🔧 Koreksi Jumlah Stok & Penyesuaian Harga")
-    st.dataframe(st.session_state.produk, use_container_width=True)
-    
-    daftar_produk_koreksi = st.session_state.produk['Nama Barang'].tolist()
-    pilih_koreksi = st.selectbox("Pilih produk yang ingin disesuaikan datanya", daftar_produk_koreksi)
-    
-    data_koreksi = st.session_state.produk[st.session_state.produk['Nama Barang'] == pilih_koreksi].iloc[0]
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        # Sesuaikan Harga Satuan Baru (Nol otomatis hilang & tanda +/- hilang)
-        harga_satuan_baru = st.number_input("Sesuaikan harga satuan baru (Rp)", min_value=0, value=None, placeholder=str(data_koreksi['Harga Satuan']))
-    with col2:
-        # Koreksi Jumlah Stok Gudang (Nol otomatis hilang & tanda +/- hilang)
-        koreksi_jumlah_stok = st.number_input("Koreksi jumlah stok baru di gudang", min_value=0, value=None, placeholder=str(data_koreksi['Stok']))
-        
-    if st.button("Terapkan Koreksi"):
-        idx = st.session_state.produk[st.session_state.produk['Nama Barang'] == pilih_koreksi].index[0]
-        
-        if harga_satuan_baru is not None:
-            st.session_state.produk.at[idx, 'Harga Satuan'] = harga_satuan_baru
-        if koreksi_jumlah_stok is not None:
-            st.session_state.produk.at[idx, 'Stok'] = koreksi_jumlah_stok
+            col_kiri, col_kanan = st.columns([3, 2])
             
-        st.success(f"Data produk '{pilih_koreksi}' berhasil diperbarui di server!")
-        st.rerun()
+            with col_kiri:
+                st.subheader("Pilih Produk")
+                # Format pilihan produk untuk dropdown
+                opsi_produk = {
+                    f"{b['nama_produk']} (Stok: {b['stok']} | Rp{b['harga']:,})": b 
+                    for b in daftar_barang if b['stok'] > 0
+                }
+                
+                if opsi_produk:
+                    pilihan = st.selectbox("Cari & Pilih Produk:", list(opsi_produk.keys()))
+                    produk_terpilih = opsi_produk[pilihan]
+                    
+                    col_stok1, col_stok2 = st.columns(2)
+                    with col_stok1:
+                        jumlah = st.number_input("Jumlah Beli:", min_value=1, max_value=int(produk_terpilih['stok']), value=1)
+                    with col_stok2:
+                        st.write("")
+                        st.write("")
+                        tambah_btn = st.button("➕ Tambah ke Keranjang", use_container_width=True)
+                        
+                    if tambah_btn:
+                        # Cek apakah barang sudah ada di keranjang
+                        exists = False
+                        for item in st.session_state.keranjang:
+                            if item["id"] == produk_terpilih["id"]:
+                                if item["jumlah"] + jumlah <= produk_terpilih["stok"]:
+                                    item["jumlah"] += jumlah
+                                    exists = True
+                                    st.success(f"Jumlah {produk_terpilih['nama_produk']} di keranjang berhasil diperbarui!")
+                                else:
+                                    st.error(f"Stok tidak mencukupi untuk menambah jumlah tersebut!")
+                                    exists = True
+                                    
+                        if not exists:
+                            st.session_state.keranjang.append({
+                                "id": produk_terpilih["id"],
+                                "nama_produk": produk_terpilih["nama_produk"],
+                                "harga": produk_terpilih["harga"],
+                                "jumlah": jumlah,
+                                "stok_maks": produk_terpilih["stok"]
+                            })
+                            st.success(f"{produk_terpilih['nama_produk']} ditambahkan ke keranjang!")
+                            st.rerun()
+                else:
+                    st.warning("Semua stok produk Anda saat ini sedang kosong!")
+            
+            with col_kanan:
+                st.subheader("📋 Keranjang Belanja")
+                
+                if not st.session_state.keranjang:
+                    st.write("*Keranjang kosong*")
+                else:
+                    df_keranjang = pd.DataFrame(st.session_state.keranjang)
+                    df_keranjang["Subtotal"] = df_keranjang["harga"] * df_keranjang["jumlah"]
+                    
+                    # Tampilkan tabel keranjang sederhana
+                    for idx, item in enumerate(st.session_state.keranjang):
+                        col_item1, col_item2, col_item3 = st.columns([3, 1, 1])
+                        col_item1.write(f"**{item['nama_produk']}**<br>Rp{item['harga']:,} x {item['jumlah']}", unsafe_allow_html=True)
+                        col_item2.write(f"**Rp{item['harga']*item['jumlah']:,}**")
+                        if col_item3.button("❌", key=f"del_{idx}"):
+                            st.session_state.keranjang.pop(idx)
+                            st.rerun()
+                            
+                    total_harga = sum(item["harga"] * item["jumlah"] for item in st.session_state.keranjang)
+                    st.markdown("---")
+                    st.markdown(f"### Total Belanja: <span style='color:#2E7D32;'>Rp {total_harga: gentleman}</span>", unsafe_allow_html=True)
+                    
+                    # Pilihan Metode Pembayaran
+                    metode_bayar = st.radio("Metode Pembayaran:", ["Tunai", "Utang / Kasbon"])
+                    
+                    if metode_bayar == "Tunai":
+                        nominal_bayar = st.number_input("Nominal Uang Bayar (Rp):", min_value=0, value=total_harga)
+                        kembalian = nominal_bayar - total_harga
+                        
+                        if kembalian >= 0:
+                            st.info(f"Kembalian: **Rp {kembalian:,}**")
+                        else:
+                            st.error("Uang yang dimasukkan kurang!")
+                            
+                        if st.button("🔥 Selesaikan Transaksi Tunai", type="primary", use_container_width=True):
+                            if nominal_bayar >= total_harga:
+                                # Kurangi stok produk di database
+                                for item in st.session_state.keranjang:
+                                    update_stok(item["id"], item["stok_maks"] - item["jumlah"])
+                                
+                                st.balloons()
+                                st.success("Transaksi Sukses! Stok produk telah otomatis diperbarui.")
+                                st.session_state.keranjang = []
+                                st.rerun()
+                                
+                    elif metode_bayar == "Utang / Kasbon":
+                        nama_pembeli_utang = st.text_input("Nama Pelanggan yang Berutang:")
+                        
+                        if st.button("📌 Catat Sebagai Utang", type="primary", use_container_width=True):
+                            if nama_pembeli_utang:
+                                # Masukkan catatan ke tabel utang
+                                if tambah_utang(user["id"], nama_pembeli_utang, total_harga):
+                                    # Kurangi stok produk
+                                    for item in st.session_state.keranjang:
+                                        update_stok(item["id"], item["stok_maks"] - item["jumlah"])
+                                        
+                                    st.success(f"Transaksi dicatat sebagai utang atas nama **{nama_pembeli_utang}**!")
+                                    st.session_state.keranjang = []
+                                    st.rerun()
+                            else:
+                                st.warning("Masukkan nama pelanggan untuk mencatat utang!")
+
+
+    # --- MENU 2: KELOLA PRODUK ---
+    elif menu == "📦 Kelola Produk":
+        st.title("📦 Kelola Produk Jualan")
+        st.write("Tambahkan, ubah, atau hapus produk jualan toko Anda di sini.")
+        
+        tab_tambah, tab_daftar_barang = st.tabs(["➕ Tambah Produk Baru", "📋 Daftar Produk Toko Anda"])
+        
+        with tab_tambah:
+            st.subheader("Formulir Produk Baru")
+            new_nama = st.text_input("Nama Produk:", placeholder="Contoh: Beras Ramos 5Kg")
+            new_harga = st.number_input("Harga Jual (Rp):", min_value=0, value=0, step=500)
+            new_stok = st.number_input("Stok Awal Barang:", min_value=0, value=0, step=1)
+            new_kode = st.text_input("Kode Produk / Barcode (Opsional):", placeholder="Contoh: BRG-001")
+            
+            if st.button("Simpan Produk", type="primary"):
+                if new_nama and new_harga > 0:
+                    if tambah_produk(user["id"], new_nama, new_harga, new_stok, new_kode):
+                        st.success(f"Produk '{new_nama}' berhasil dimasukkan ke etalase toko!")
+                        st.rerun()
+                else:
+                    st.warning("Nama produk dan Harga jual wajib diisi secara benar!")
+                    
+        with tab_daftar_barang:
+            st.subheader("Data Semua Produk Jualan")
+            semua_produk = ambil_produk(user["id"])
+            
+            if not semua_produk:
+                st.info("Belum ada produk terdaftar.")
+            else:
+                df_tampil = pd.DataFrame(semua_produk)
+                # Rapikan kolom tabel untuk user
+                df_tampil = df_tampil.rename(columns={
+                    "nama_produk": "Nama Produk",
+                    "harga": "Harga (Rp)",
+                    "stok": "Sisa Stok",
+                    "kode_produk": "Kode Barang"
+                })
+                
+                # Tampilkan tabel produk
+                st.dataframe(df_tampil[["Nama Produk", "Harga (Rp)", "Sisa Stok", "Kode Barang"]], use_container_width=True)
+                
+                st.markdown("---")
+                st.subheader("⚙️ Aksi Cepat Produk")
+                
+                # Pilihan edit stok cepat
+                produk_pilihan_opsi = {p["nama_produk"]: p for p in semua_produk}
+                pilih_edit = st.selectbox("Pilih Produk yang Ingin Diedit / Dihapus:", list(produk_pilihan_opsi.keys()))
+                prod_data = produk_pilihan_opsi[pilih_edit]
+                
+                col_act1, col_act2 = st.columns(2)
+                with col_act1:
+                    st.markdown(f"**Ubah Stok Barang**")
+                    stok_edit_val = st.number_input("Atur Stok Baru:", min_value=0, value=int(prod_data["stok"]))
+                    if st.button("💾 Simpan Stok Baru", use_container_width=True):
+                        update_stok(prod_data["id"], stok_edit_val)
+                        st.success(f"Stok produk '{prod_data['nama_produk']}' berhasil diubah!")
+                        st.rerun()
+                        
+                with col_act2:
+                    st.markdown("**Hapus Produk**")
+                    st.write("Aksi ini tidak bisa dibatalkan.")
+                    if st.button("🗑️ Hapus Produk Permanen", type="secondary", use_container_width=True):
+                        if hapus_produk(prod_data["id"]):
+                            st.success("Produk berhasil dihapus dari etalase toko!")
+                            st.rerun()
+
+
+    # --- MENU 3: CATATAN UTANG ---
+    elif menu == "💸 Catatan Utang / Kasbon":
+        st.title("💸 Buku Catatan Utang & Kasbon")
+        st.write("Pantau dan catat transaksi utang piutang pelanggan toko Anda.")
+        
+        col_utang1, col_utang2 = st.columns([3, 2])
+        
+        with col_utang1:
+            st.subheader("Daftar Piutang Pelanggan")
+            list_utang = ambil_utang(user["id"])
+            
+            if not list_utang:
+                st.info("Hebat! Saat ini tidak ada pelanggan yang tercatat memiliki utang di toko Anda. 🎉")
+            else:
+                df_utang = pd.DataFrame(list_utang)
+                df_utang["tanggal_utang"] = pd.to_datetime(df_utang["tanggal_utang"]).dt.strftime('%d %B %Y')
+                
+                for idx, row in df_utang.iterrows():
+                    with st.container():
+                        st.markdown(f"""
+                        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 8px; border-left: 5px solid #d32f2f; margin-bottom: 10px;">
+                            <span style="font-size: 1.15rem; font-weight: bold; color: #333;">{row['nama_pelanggan']}</span><br>
+                            <span style="color: #c62828; font-weight: bold; font-size: 1.1rem;">Sisa Utang: Rp {row['sisa_utang']:,}</span><br>
+                            <span style="color: #777; font-size: 0.85rem;">Tanggal Berutang: {row['tanggal_utang']}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Tombol cicil utang cepat
+                        with st.expander(f"Bayar / Cicil Utang {row['nama_pelanggan']}"):
+                            bayar_nom = st.number_input("Nominal Bayar (Rp):", min_value=1, max_value=int(row['sisa_utang']), value=int(row['sisa_utang']), key=f"pay_val_{row['id']}")
+                            if st.button("Konfirmasi Pembayaran", key=f"pay_btn_{row['id']}", type="primary"):
+                                if bayar_utang_db(row['id'], bayar_nom, row['sisa_utang']):
+                                    st.success(f"Pembayaran utang sebesar Rp{bayar_nom:,} berhasil disimpan!")
+                                    st.rerun()
+                                    
+        with col_utang2:
+            st.subheader("➕ Catat Utang Baru Manual")
+            st.write("Gunakan menu ini jika Anda ingin mencatat utang secara manual tanpa melalui transaksi kasir penjualan.")
+            
+            u_nama = st.text_input("Nama Lengkap Pelanggan:", placeholder="Contoh: Pak Budi")
+            u_nominal = st.number_input("Nominal Utang (Rp):", min_value=0, value=0, step=1000)
+            
+            if st.button("Simpan Catatan Utang", use_container_width=True):
+                if u_nama and u_nominal > 0:
+                    if tambah_utang(user["id"], u_nama, u_nominal):
+                        st.success(f"Utang atas nama **{u_nama}** sebesar **Rp{u_nominal:,}** sukses dicatat!")
+                        st.rerun()
+                else:
+                    st.warning("Nama pelanggan dan Nominal utang harus diisi dengan benar!")
