@@ -19,7 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent
 FILE_STOK = BASE_DIR / "stok_barang.xlsx"
 FILE_CONFIG = BASE_DIR / "pengaturan_toko.txt"
 
-# Menghasilkan nama file keuangan dinamis berdasarkan Bulan & Tahun saat ini (Contoh: laporan_keuangan_2026_07.xlsx)
+# Menghasilkan nama file keuangan dinamis berdasarkan Bulan & Tahun saat ini
 waktu_sekarang_dt = datetime.now()
 nama_file_bulanan = f"laporan_keuangan_{waktu_sekarang_dt.strftime('%Y_%m')}.xlsx"
 FILE_EXCEL = BASE_DIR / nama_file_bulanan
@@ -39,6 +39,16 @@ KOLOM_STOK = ["Nama Barang", "Harga Satuan", "Stok"]
 # --- FUNGSI UTAS DATA (EXCEL) ---
 def rupiah(nilai: float | int) -> str:
     return f"Rp {int(nilai):,}".replace(",", ".")
+
+def dapatkan_waktu_lokal() -> str:
+    """Menghasilkan format waktu Indonesia yang rapi."""
+    nama_bulan = [
+        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+        "Juli", "Agustus", "September", "Otober", "November", "Desember"
+    ]
+    sekarang = datetime.now()
+    bulan_indo = nama_bulan[sekarang.month - 1]
+    return sekarang.strftime(f"%d {bulan_indo} %Y %H:%M")
 
 def muat_excel(path: Path, kolom: List[str]) -> pd.DataFrame:
     if not path.exists():
@@ -109,12 +119,11 @@ def muat_transaksi() -> pd.DataFrame:
 def saring_transaksi_hari_ini(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-    tgl_hari_ini = datetime.now().strftime("%Y-%m-%d")
-    # Memastikan kolom Waktu dicocokkan berdasarkan tanggal saja
+    tgl_hari_ini = datetime.now().strftime("%d")
+    # Filter pencocokan tanggal hari ini dari format string tanggal baru
     return df[df["Waktu"].astype(str).str.startswith(tgl_hari_ini)].reset_index(drop=True)
 
 def hitung_ringkasan(df_transaksi: pd.DataFrame, untuk_kasir: bool = False) -> Tuple[int, int, int, int]:
-    # Jika kasir, filter ringkasan hanya untuk transaksi tanggal hari ini saja (Auto Daily Update)
     if untuk_kasir:
         df_hitung = saring_transaksi_hari_ini(df_transaksi)
     else:
@@ -198,9 +207,11 @@ def proses_transaksi(nama_pembeli: str, uang_bayar: int, df_stok: pd.DataFrame, 
         return False, "Nama pembeli wajib diisi terlebih dahulu.", ""
     if not st.session_state.keranjang:
         return False, "Keranjang masih kosong.", ""
+    if uang_bayar < 0:
+        return False, "Uang pembayaran tidak boleh bernilai negatif.", ""
 
     total_belanja = sum(item["subtotal"] for item in st.session_state.keranjang)
-    waktu_sekarang = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    waktu_sekarang = dapatkan_waktu_lokal()
     selisih = int(uang_bayar) - int(total_belanja)
     status = "LUNAS" if selisih >= 0 else "UTANG"
     kembali = max(selisih, 0)
@@ -285,7 +296,6 @@ if not st.session_state.status_login:
             tombol_masuk = st.form_submit_button("Masuk Ke Aplikasi", use_container_width=True, type="primary")
             
             if tombol_masuk:
-                # Kredensial Akun Sederhana
                 if username == "owner" and password == "pammase77":
                     st.session_state.status_login = True
                     st.session_state.peran_user = "Owner"
@@ -301,7 +311,6 @@ if not st.session_state.status_login:
     st.stop()
 
 # --- TAMPILAN DASHBOARD (SETELAH LOGIN) ---
-# Tombol Keluar di Bar Atas
 col_judul, col_logout = st.columns([5, 1])
 with col_judul:
     st.title(f"🏪 {nama_toko}")
@@ -316,7 +325,6 @@ with col_logout:
 
 st.write("---")
 
-# Penghitungan Ringkasan: Jika kasir, otomatis hanya menghitung data transaksi tanggal hari ini saja.
 apakah_kasir = (st.session_state.peran_user == "Kasir")
 total_transaksi, omzet, total_utang, jumlah_pelanggan_utang = hitung_ringkasan(df_transaksi, untuk_kasir=apakah_kasir)
 
@@ -331,7 +339,6 @@ if not stok_alert.empty:
     daftar_alert = ", ".join(f"{row['Nama Barang']} ({int(row['Stok'])} sisa)" for _, row in stok_alert.iterrows())
     st.warning(f"⚠️ **Stok Minim Terdeteksi:** {daftar_alert}")
 
-# --- PEMBAGIAN MENU BERDASARKAN HAK AKSES ---
 if st.session_state.peran_user == "Owner":
     tabs_menu = ["🛒 Kasir", "💳 Pelunasan Utang", "📥 Kelola Barang", "📦 Stok Gudang", "⚙️ Pengaturan"]
 else:
@@ -426,7 +433,6 @@ with list_tabs[0]:
         st.subheader("📄 Nota Pembayaran Terakhir")
         st.code(st.session_state.nota_terakhir, language="text")
         
-        # Opsi Teks Cepat untuk WhatsApp
         st.subheader("📲 Kirim Nota Via WhatsApp")
         text_wa = st.session_state.nota_terakhir
         st.text_area("Salin teks di bawah ini untuk WhatsApp Pelanggan:", value=text_wa, height=150)
@@ -457,7 +463,7 @@ with list_tabs[1]:
                         st.error("Nominal pembayaran melebihi total utang pelanggan.")
                     else:
                         df_baru, sisa_bayar = distribusikan_pembayaran_utang(df_transaksi, nama_pelanggan, int(nominal_bayar))
-                        waktu_sekarang = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        waktu_sekarang = dapatkan_waktu_lokal()
                         status_pelunasan = "PELUNASAN UTANG (LUNAS)" if nominal_bayar == total_utang_pelanggan else "PELUNASAN UTANG (SEBAGIAN)"
                         
                         catatan_pelunasan = {
@@ -469,7 +475,7 @@ with list_tabs[1]:
                         st.success("Pembayaran utang berhasil disimpan.")
                         st.rerun()
 
-# === TAB 3: STOK GUDANG (Kasir & Owner Bisa Akses) ===
+# === TAB 3: STOK GUDANG ===
 posisi_tab_gudang = 2 if apakah_kasir else 3
 with list_tabs[posisi_tab_gudang]:
     st.subheader("Stok Gudang dan Manajemen Produk")
@@ -486,11 +492,29 @@ with list_tabs[posisi_tab_gudang]:
             "Harga Satuan": st.column_config.NumberColumn(format="Rp %d"),
         })
 
+        # KOREKSI STOK INSTAN (Hanya untuk Owner)
         if not apakah_kasir:
             st.write("---")
-            st.markdown("### Hapus Produk Permanen")
+            st.markdown("### ✏️ Edit Harga / Koreksi Jumlah Stok")
+            with st.form("form_koreksi_stok"):
+                produk_koreksi = st.selectbox("Pilih produk yang ingin diedit data fisiknya", df_tampil["Nama Barang"].tolist())
+                data_lama = df_tampil[df_tampil["Nama Barang"] == produk_koreksi].iloc[0]
+                
+                harga_koreksi = st.number_input("Sesuaikan Harga Satuan Baru", min_value=0, value=int(data_lama["Harga Satuan"]), step=500)
+                stok_koreksi = st.number_input("Sesuaikan Jumlah Stok Fisik Asli", min_value=0, value=int(data_lama["Stok"]), step=1)
+                
+                submit_koreksi = st.form_submit_button("Simpan Perubahan Data", type="primary")
+                if submit_koreksi:
+                    df_tampil.loc[df_tampil["Nama Barang"] == produk_koreksi, "Harga Satuan"] = int(harga_koreksi)
+                    df_tampil.loc[df_tampil["Nama Barang"] == produk_koreksi, "Stok"] = int(stok_koreksi)
+                    simpan_excel(df_tampil, FILE_STOK)
+                    st.success(f"Data fisik untuk `{produk_koreksi}` berhasil disesuaikan!")
+                    st.rerun()
+
+            st.write("---")
+            st.markdown("### 🗑️ Hapus Produk Permanen")
             with st.form("form_hapus_produk"):
-                nama_hapus = st.selectbox("Pilih produk yang ingin dihapus", df_tampil["Nama Barang"].tolist())
+                nama_hapus = st.selectbox("Pilih produk yang ingin dihapus dari sistem", df_tampil["Nama Barang"].tolist())
                 konfirmasi = st.checkbox("Saya yakin ingin menghapus produk ini secara permanen.")
                 submit_hapus = st.form_submit_button("Hapus Produk", type="primary")
                 if submit_hapus:
@@ -510,9 +534,9 @@ with list_tabs[posisi_tab_gudang]:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-# === FITUR KHUSUS OWNER (KELOLA BARANG & PENGATURAN) ===
+# === FITUR KHUSUS OWNER ===
 if not apakah_kasir:
-    # TAB: KELOLA BARANG (HANYA OWNER)
+    # TAB: KELOLA BARANG
     with list_tabs[2]:
         st.subheader("Daftarkan Produk Baru atau Tambah Stok")
         with st.form("form_barang", clear_on_submit=True):
@@ -542,7 +566,7 @@ if not apakah_kasir:
                         st.success(f"Produk baru `{nama_bersih}` berhasil ditambahkan.")
                     st.rerun()
 
-    # TAB: PENGATURAN (HANYA OWNER)
+    # TAB: PENGATURAN
     with list_tabs[4]:
         st.subheader("Pengaturan Toko & Arsip Laporan")
         with st.form("form_pengaturan"):
