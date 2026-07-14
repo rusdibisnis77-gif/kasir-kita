@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Tuple
 
@@ -163,12 +163,13 @@ def buat_teks_belanjaan(keranjang: List[dict]) -> str:
 
 def buat_nota(
     nama_toko: str, waktu: str, pelanggan: str, keranjang: List[dict],
-    total: int, bayar: int, kembali: int, status: str, sisa_utang: int,
+    total: int, diskon: int, bayar: int, kembali: int, status: str, sisa_utang: int,
 ) -> str:
     detail = "\n".join(
-        f"- {item['barang'][:18]:<18} {item['jumlah']:>2}x  {rupiah(item['subtotal'])}"
+        f"{item['barang'][:20]:<20} {item['jumlah']:>2}x  {rupiah(item['subtotal'])}"
         for item in keranjang
     )
+    diskon_text = f"DISKON/POTONGAN: {rupiah(diskon)}\n" if diskon > 0 else ""
     sisa_text = f"SISA UTANG    : {rupiah(sisa_utang)}\n" if sisa_utang > 0 else ""
     return (
         "==========================================\n"
@@ -180,6 +181,7 @@ def buat_nota(
         "Detail Belanja:\n"
         f"{detail}\n"
         "------------------------------------------\n"
+        f"{diskon_text}"
         f"GRAND TOTAL   : {rupiah(total)}\n"
         f"UANG TUNAI    : {rupiah(bayar)}\n"
         f"KEMBALIAN     : {rupiah(kembali)}\n"
@@ -215,15 +217,19 @@ def tambah_ke_keranjang(df_stok: pd.DataFrame, nama_barang: str, jumlah: int) ->
     })
     return True, f"{nama_barang} berhasil ditambahkan ke keranjang."
 
-def proses_transaksi(nama_pembeli: str, uang_bayar: int, df_stok: pd.DataFrame, df_transaksi: pd.DataFrame, nama_toko: str) -> Tuple[bool, str, str]:
+def proses_transaksi(nama_pembeli: str, uang_bayar: int, diskon: int, df_stok: pd.DataFrame, df_transaksi: pd.DataFrame, nama_toko: str) -> Tuple[bool, str, str]:
     if not nama_pembeli.strip():
         return False, "Nama pembeli wajib diisi terlebih dahulu.", ""
     if not st.session_state.keranjang:
         return False, "Keranjang masih kosong.", ""
     if uang_bayar < 0:
         return False, "Uang pembayaran tidak boleh bernilai negatif.", ""
+    if diskon < 0:
+        return False, "Diskon tidak boleh bernilai negatif.", ""
 
-    total_belanja = sum(item["subtotal"] for item in st.session_state.keranjang)
+    total_kotor = sum(item["subtotal"] for item in st.session_state.keranjang)
+    total_belanja = max(0, total_kotor - diskon)
+    
     waktu_sekarang = dapatkan_waktu_lokal()
     selisih = int(uang_bayar) - int(total_belanja)
     status = "LUNAS" if selisih >= 0 else "UTANG"
@@ -255,10 +261,10 @@ def proses_transaksi(nama_pembeli: str, uang_bayar: int, df_stok: pd.DataFrame, 
 
     nota = buat_nota(
         nama_toko=nama_toko, waktu=waktu_sekarang, pelanggan=nama_pembeli.strip(),
-        keranjang=st.session_state.keranjang, total=int(total_belanja), bayar=int(uang_bayar),
-        kembali=int(kembali), status=status, sisa_utang=int(sisa_utang),
+        keranjang=st.session_state.keranjang, total=int(total_belanja), diskon=int(diskon), 
+        bayar=int(uang_bayar), kembali=int(kembali), status=status, sisa_utang=int(sisa_utang),
     )
-    catat_log(f"Transaksi SUKSES. Pembeli: {nama_pembeli.strip()}, Total: {rupiah(total_belanja)}, Status: {status}")
+    catat_log(f"Transaksi SUKSES. Pembeli: {nama_pembeli.strip()}, Total Akhir: {rupiah(total_belanja)} (Diskon: {rupiah(diskon)}), Status: {status}")
     return True, "Transaksi berhasil disimpan.", nota
 
 def distribusikan_pembayaran_utang(df_keuangan: pd.DataFrame, nama_pelanggan: str, bayar: int) -> Tuple[pd.DataFrame, int]:
@@ -330,7 +336,7 @@ if not st.session_state.status_login:
 col_judul, col_logout = st.columns([5, 1])
 with col_judul:
     st.title(f"🏪 {nama_toko}")
-    st.caption(f"Status Pengguna: **{st.session_state.peran_user}** | Arsip Aktif: `{nama_file_bulanan}` (Auto Monthly Updated)")
+    st.caption(f"Status Pengguna: **{st.session_state.peran_user}** | Laporan Bulan Ini: `{nama_file_bulanan}`")
 with col_logout:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚪 Keluar (Logout)", use_container_width=True, type="secondary"):
@@ -376,8 +382,21 @@ with list_tabs[0]:
             st.session_state.pembeli_sekarang = nama_input
 
             st.markdown("### 2. Tambah Barang")
-            daftar_produk = df_stok["Nama Barang"].tolist()
-            barang_terpilih = st.selectbox("Pilih produk", daftar_produk, key="sb_barang_terpilih")
+            
+            # FITUR BARU: Simulasi Pencarian Kilat / Scan Barcode
+            pencarian_barcode = st.text_input("🔍 Input Cepat / Ketik Nama Barang (Simulasi Scan)", placeholder="Ketik nama produk untuk menyaring...")
+            
+            df_stok_saring = df_stok.copy()
+            if pencarian_barcode.strip():
+                df_stok_saring = df_stok_saring[df_stok_saring["Nama Barang"].str.contains(pencarian_barcode.strip(), case=False, na=False)]
+            
+            if df_stok_saring.empty:
+                st.error("Produk tidak ditemukan berdasarkan filter pencarian di atas.")
+                daftar_produk = df_stok["Nama Barang"].tolist()
+            else:
+                daftar_produk = df_stok_saring["Nama Barang"].tolist()
+                
+            barang_terpilih = st.selectbox("Pilih produk hasil saringan", daftar_produk, key="sb_barang_terpilih")
             
             info_barang = df_stok[df_stok["Nama Barang"] == barang_terpilih].iloc[0]
             stok_gudang_asli = int(info_barang["Stok"])
@@ -412,31 +431,36 @@ with list_tabs[0]:
                     "Subtotal": st.column_config.NumberColumn(format="Rp %d"),
                 })
 
-                total_harus_dibayar = int(df_keranjang["Subtotal"].sum())
-                st.metric("Total Belanja", rupiah(total_harus_dibayar))
+                total_kotor = int(df_keranjang["Subtotal"].sum())
+                
+                diskon_input = st.number_input("Potongan Harga / Diskon (Rp)", min_value=0, max_value=total_kotor, step=500, value=0)
+                total_harus_dibayar = max(0, total_kotor - diskon_input)
+                
+                if diskon_input > 0:
+                    st.caption(f"Total Kotor: {rupiah(total_kotor)} | Hemat: {rupiah(diskon_input)}")
+                st.metric("Total Akhir Belanja", rupiah(total_harus_dibayar))
 
-                # KOREKSI EDIT KERANJANG (Hapus Item Per Baris Spesifik)
                 with st.form("form_hapus_item"):
                     item_dihapus = st.selectbox("Batal beli / Hapus item tertentu dari keranjang:", df_keranjang["Nama Barang"].tolist())
                     submit_hapus = st.form_submit_button("Hapus Item Terpilih", type="secondary")
                     if submit_hapus:
                         st.session_state.keranjang = [i for i in st.session_state.keranjang if i["barang"] != item_dihapus]
-                        catatan_log(f"Menghapus item `{item_dihapus}` dari daftar keranjang belanja.")
+                        catat_log(f"Menghapus item `{item_dihapus}` dari daftar keranjang belanja.")
                         st.rerun()
 
                 col_reset, col_bayar = st.columns([1, 1.4])
                 with col_reset:
                     if st.button("Kosongkan Keranjang", use_container_width=True):
                         st.session_state.keranjang = []
-                        catatan_log("Mengosongkan seluruh isi keranjang.")
+                        catat_log("Mengosongkan seluruh isi keranjang.")
                         st.rerun()
                 with col_bayar:
                     with st.form("form_pembayaran"):
                         uang_bayar = st.number_input("Uang tunai / DP", min_value=0, step=1000)
-                        submit_bayar = st.form_submit_button("Proses dan Simpan Transaksi", use_container_width=True, type="primary")
+                        submit_bayar = st.form_submit_button("Proses & Simpan Transaksi", use_container_width=True, type="primary")
                         if submit_bayar:
                             berhasil, pesan, nota = proses_transaksi(
-                                nama_pembeli=nama_input, uang_bayar=int(uang_bayar),
+                                nama_pembeli=nama_input, uang_bayar=int(uang_bayar), diskon=int(diskon_input),
                                 df_stok=df_stok, df_transaksi=df_transaksi, nama_toko=nama_toko
                             )
                             if berhasil:
@@ -450,12 +474,13 @@ with list_tabs[0]:
 
     if st.session_state.nota_terakhir:
         st.write("---")
-        st.subheader("📄 Nota Pembayaran Terakhir")
+        st.subheader("📄 Nota Pembayaran Terakhir (Format Printer Thermal)")
+        
+        # Penyesuaian layout struk agar ramah dibaca dan disalin ke printer kasir mini
         st.code(st.session_state.nota_terakhir, language="text")
         
-        st.subheader("📲 Kirim Nota Via WhatsApp")
-        text_wa = st.session_state.nota_terakhir
-        st.text_area("Salin teks di bawah ini untuk WhatsApp Pelanggan:", value=text_wa, height=150)
+        st.subheader("📲 Kirim Teks Struk")
+        st.text_area("Salin teks di bawah ini untuk WhatsApp/Keperluan lain:", value=st.session_state.nota_terakhir, height=150)
 
 # === TAB 2: PELUNASAN UTANG ===
 with list_tabs[1]:
@@ -492,7 +517,7 @@ with list_tabs[1]:
                         }
                         df_baru = pd.concat([df_baru, pd.DataFrame([catatan_pelunasan])], ignore_index=True)
                         simpan_excel(df_baru, FILE_EXCEL)
-                        catatan_log(f"Menerima pelunasan utang dari pembeli `{nama_pelanggan}` sebesar {rupiah(nominal_bayar)}")
+                        catat_log(f"Menerima pelunasan utang dari pembeli `{nama_pelanggan}` sebesar {rupiah(nominal_bayar)}")
                         st.success("Pembayaran utang berhasil disimpan.")
                         st.rerun()
 
@@ -528,7 +553,7 @@ with list_tabs[posisi_tab_gudang]:
                     df_tampil.loc[df_tampil["Nama Barang"] == produk_koreksi, "Harga Satuan"] = int(harga_koreksi)
                     df_tampil.loc[df_tampil["Nama Barang"] == produk_koreksi, "Stok"] = int(stok_koreksi)
                     simpan_excel(df_tampil, FILE_STOK)
-                    catatan_log(f"KOREKSI STOK. Mengubah data `{produk_koreksi}` menjadi Harga: {rupiah(harga_koreksi)}, Stok: {stok_koreksi}")
+                    catat_log(f"KOREKSI STOK. Mengubah data `{produk_koreksi}` menjadi Harga: {rupiah(harga_koreksi)}, Stok: {stok_koreksi}")
                     st.success(f"Data fisik untuk `{produk_koreksi}` berhasil disesuaikan!")
                     st.rerun()
 
@@ -544,7 +569,7 @@ with list_tabs[posisi_tab_gudang]:
                     else:
                         df_baru = df_tampil[df_tampil["Nama Barang"] != nama_hapus].reset_index(drop=True)
                         simpan_excel(df_baru, FILE_STOK)
-                        catatan_log(f"Menghapus produk `{nama_hapus}` secara permanen dari sistem rak.")
+                        catat_log(f"Menghapus produk `{nama_hapus}` secara permanen dari sistem rak.")
                         st.success(f"Produk `{nama_hapus}` berhasil dihapus.")
                         st.rerun()
 
@@ -580,17 +605,17 @@ if not apakah_kasir:
                         df_gudang.loc[mask, "Stok"] = pd.to_numeric(df_gudang.loc[mask, "Stok"], errors="coerce").fillna(0).astype(int) + int(jumlah_stok_baru)
                         df_gudang.loc[mask, "Harga Satuan"] = int(harga_jual_baru)
                         simpan_excel(df_gudang, FILE_STOK)
-                        catatan_log(f"Menambah pasokan stok lama untuk `{nama_asli}` sebanyak {jumlah_stok_baru} item.")
+                        catat_log(f"Menambah pasokan stok lama untuk `{nama_asli}` sebanyak {jumlah_stok_baru} item.")
                         st.success(f"Produk `{nama_asli}` diperbarui.")
                     else:
                         data_baru = pd.DataFrame([{"Nama Barang": nama_bersih, "Harga Satuan": int(harga_jual_baru), "Stok": int(jumlah_stok_baru)}])
                         df_gudang = pd.concat([df_gudang, data_baru], ignore_index=True)
                         simpan_excel(df_gudang, FILE_STOK)
-                        catatan_log(f"Mendaftarkan BARANG BARU `{nama_bersih}` dengan harga {rupiah(harga_jual_baru)} isi {jumlah_stok_baru} item.")
+                        catat_log(f"Mendaftarkan BARANG BARU `{nama_bersih}` dengan harga {rupiah(harga_jual_baru)} isi {jumlah_stok_baru} item.")
                         st.success(f"Produk baru `{nama_bersih}` berhasil ditambahkan.")
                     st.rerun()
 
-    # TAB: PENGATURAN
+    # TAB: PENGATURAN & AUDIT
     with list_tabs[4]:
         st.subheader("Pengaturan Toko & Arsip Laporan")
         with st.form("form_pengaturan"):
@@ -606,16 +631,45 @@ if not apakah_kasir:
 
         st.write("---")
         
-        # PENCARIAN RIWAYAT NOTA PINTAR
-        st.markdown("### 🔍 Pelacakan Riwayat Penjualan Lama")
-        kata_kunci_cari = st.text_input("Cari transaksi (Ketik Nama Pembeli / Tanggal / Status Lunas):", placeholder="Misal: Andi / Lunas / 14 Juli")
+        st.markdown("### 🔍 Pelacakan Riwayat Penjualan")
+        
+        # FITUR BARU: Filter Berdasarkan Rentang Tanggal
+        col_tgl1, col_tgl2 = st.columns(2)
+        with col_tgl1:
+            tgl_mulai = st.date_input("Tanggal Mulai Audit", value=datetime.now() - timedelta(days=7))
+        with col_tgl2:
+            tgl_selesai = st.date_input("Tanggal Selesai Audit", value=datetime.now())
+            
+        kata_kunci_cari = st.text_input("Saring berdasarkan Kata Kunci (Nama Pembeli / Status):", placeholder="Misal: Andi / Lunas")
+        
         df_pencarian = df_transaksi.copy()
         
-        if kata_kunci_cari.strip():
+        # Logika pemfilteran tanggal dari kolom string "Waktu" (Format: "DD Bulan YYYY HH:MM")
+        if not df_pencarian.empty:
+            def konversi_ke_tanggal(teks_waktu):
+                try:
+                    # Ambil bagian tanggal, bulan, tahun saja ("DD Bulan YYYY")
+                    bagian_tgl = " ".join(str(teks_waktu).split()[:3])
+                    nama_bulan = [
+                        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+                        "Juli", "Agustus", "September", "Oktober", "November", "December"
+                    ]
+                    elemen = bagian_tgl.split()
+                    d = int(elemen[0])
+                    m = nama_bulan.index(elemen[1]) + 1
+                    y = int(elemen[2])
+                    return datetime(y, m, d).date()
+                except Exception:
+                    return datetime.now().date()
+
+            df_pencarian["Tanggal_Obj"] = df_pencarian["Waktu"].apply(konversi_ke_tanggal)
+            df_pencarian = df_pencarian[(df_pencarian["Tanggal_Obj"] >= tgl_mulai) & (df_pencarian["Tanggal_Obj"] <= tgl_selesai)]
+            df_pencarian = df_pencarian.drop(columns=["Tanggal_Obj"])
+
+        if kata_kunci_cari.strip() and not df_pencarian.empty:
             kunci = kata_kunci_cari.strip().lower()
             df_pencarian = df_pencarian[
                 df_pencarian["Nama Pembeli"].str.lower().str.contains(kunci) |
-                df_pencarian["Waktu"].str.lower().str.contains(kunci) |
                 df_pencarian["Status"].str.lower().str.contains(kunci)
             ]
             
@@ -636,12 +690,52 @@ if not apakah_kasir:
                 use_container_width=True,
             )
             
-        # PENGATURAN LOG AUDIT TOKO
         st.write("---")
         st.markdown("### 📋 Log Keamanan Aktivitas Aplikasi (Audit Sistem)")
         if FILE_LOG.exists():
             isi_log = FILE_LOG.read_text(encoding="utf-8")
-            st.text_area("Seluruh riwayat klik tombol kasir & owner:", value=isi_log, height=200)
+            st.text_area("Seluruh riwayat aktivitas tombol sistem:", value=isi_log, height=200)
             if st.button("🔴 Kosongkan Riwayat Log", type="secondary"):
                 FILE_LOG.write_text("=== LOG DIRESET OLEH OWNER ===\n", encoding="utf-8")
                 st.rerun()
+                # ==========================================
+# PENGATURAN OTOMATIS: AUTO-CLEAR ANGKA NOL
+# ==========================================
+import streamlit as st
+
+st.components.v1.html(
+    """
+    <script>
+    // Fungsi ini akan berjalan otomatis setiap kali halaman kasir dimuat
+    const bersihkanNolOtomatis = () => {
+        // Mencari semua elemen input angka (termasuk Jumlah Beli, Tunai, Diskon) di layar
+        const semuaInput = window.parent.document.querySelectorAll('input[type="number"]');
+        
+        semuaInput.forEach(input => {
+            // Hindari menempelkan fungsi ganda jika halaman ter-refresh
+            if (!input.dataset.hasAutoClear) {
+                input.dataset.hasAutoClear = "true";
+                
+                # Saat kursor kasir mengklik atau masuk ke kolom angka[span_1](start_span)[span_1](end_span)[span_2](start_span)[span_2](end_span)
+                input.addEventListener('focus', function() {
+                    if (this.value === '0') {
+                        this.value = ''; // Angka 0 langsung hilang otomatis[span_3](start_span)[span_3](end_span)[span_4](start_span)[span_4](end_span)
+                    }
+                });
+                
+                # Saat kursor kasir pindah ke kolom lain[span_5](start_span)[span_5](end_span)[span_6](start_span)[span_6](end_span)
+                input.addEventListener('blur', function() {
+                    if (this.value === '') {
+                        this.value = '0'; // Kembalikan ke angka 0 jika dibiarkan kosong[span_7](start_span)[span_7](end_span)[span_8](start_span)[span_8](end_span)
+                    }
+                });
+            }
+        });
+    };
+
+    // Jalankan pemindaian kolom secara berkala agar tetap aktif saat Anda pindah-pindah Tab menu
+    setInterval(bersihkanNolOtomatis, 500);
+    </script>
+    """,
+    height=0, # Dibuat tersembunyi agar tidak merusak tampilan desain kasir Anda
+)
