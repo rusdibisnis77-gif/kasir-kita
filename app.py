@@ -18,6 +18,7 @@ st.set_page_config(
 BASE_DIR = Path(__file__).resolve().parent
 FILE_STOK = BASE_DIR / "stok_barang.xlsx"
 FILE_CONFIG = BASE_DIR / "pengaturan_toko.txt"
+FILE_LOG = BASE_DIR / "log_aktivitas.txt"
 
 # Menghasilkan nama file keuangan dinamis berdasarkan Bulan & Tahun saat ini
 waktu_sekarang_dt = datetime.now()
@@ -36,19 +37,28 @@ KOLOM_TRANSAKSI = [
 ]
 KOLOM_STOK = ["Nama Barang", "Harga Satuan", "Stok"]
 
-# --- FUNGSI UTAS DATA (EXCEL) ---
+# --- FUNGSI UTAS DATA (EXCEL & LOG) ---
 def rupiah(nilai: float | int) -> str:
     return f"Rp {int(nilai):,}".replace(",", ".")
 
 def dapatkan_waktu_lokal() -> str:
-    """Menghasilkan format waktu Indonesia yang rapi."""
     nama_bulan = [
         "Januari", "Februari", "Maret", "April", "Mei", "Juni",
-        "Juli", "Agustus", "September", "Otober", "November", "Desember"
+        "Juli", "Agustus", "September", "Oktober", "November", "Desember"
     ]
     sekarang = datetime.now()
     bulan_indo = nama_bulan[sekarang.month - 1]
     return sekarang.strftime(f"%d {bulan_indo} %Y %H:%M")
+
+def catat_log(pesan: str) -> None:
+    """Mencatat aktivitas penting ke dalam file teks log."""
+    waktu = dapatkan_waktu_lokal()
+    user = st.session_state.get("peran_user", "System")
+    try:
+        with open(FILE_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{waktu}] ({user}) {pesan}\n")
+    except OSError:
+        pass
 
 def muat_excel(path: Path, kolom: List[str]) -> pd.DataFrame:
     if not path.exists():
@@ -82,6 +92,9 @@ def inisialisasi_sistem() -> None:
         
     if not FILE_CONFIG.exists():
         FILE_CONFIG.write_text("UD PAMMASE PUANG", encoding="utf-8")
+        
+    if not FILE_LOG.exists():
+        FILE_LOG.write_text("=== LOG AKTIVITAS TOKO DIMULAI ===\n", encoding="utf-8")
 
 def dapatkan_nama_toko() -> str:
     try:
@@ -92,6 +105,7 @@ def dapatkan_nama_toko() -> str:
 
 def simpan_nama_toko(nama_baru: str) -> None:
     FILE_CONFIG.write_text(nama_baru.strip(), encoding="utf-8")
+    catat_log(f"Mengubah nama toko menjadi: {nama_baru.strip()}")
 
 def muat_stok() -> pd.DataFrame:
     df = muat_excel(FILE_STOK, KOLOM_STOK).copy()
@@ -120,7 +134,6 @@ def saring_transaksi_hari_ini(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     tgl_hari_ini = datetime.now().strftime("%d")
-    # Filter pencocokan tanggal hari ini dari format string tanggal baru
     return df[df["Waktu"].astype(str).str.startswith(tgl_hari_ini)].reset_index(drop=True)
 
 def hitung_ringkasan(df_transaksi: pd.DataFrame, untuk_kasir: bool = False) -> Tuple[int, int, int, int]:
@@ -245,6 +258,7 @@ def proses_transaksi(nama_pembeli: str, uang_bayar: int, df_stok: pd.DataFrame, 
         keranjang=st.session_state.keranjang, total=int(total_belanja), bayar=int(uang_bayar),
         kembali=int(kembali), status=status, sisa_utang=int(sisa_utang),
     )
+    catat_log(f"Transaksi SUKSES. Pembeli: {nama_pembeli.strip()}, Total: {rupiah(total_belanja)}, Status: {status}")
     return True, "Transaksi berhasil disimpan.", nota
 
 def distribusikan_pembayaran_utang(df_keuangan: pd.DataFrame, nama_pelanggan: str, bayar: int) -> Tuple[pd.DataFrame, int]:
@@ -299,11 +313,13 @@ if not st.session_state.status_login:
                 if username == "owner" and password == "pammase77":
                     st.session_state.status_login = True
                     st.session_state.peran_user = "Owner"
+                    catat_log("Login BERHASIL ke dalam sistem.")
                     st.success("Login Pemilik Toko Berhasil!")
                     st.rerun()
                 elif username == "kasir" and password == "kasir123":
                     st.session_state.status_login = True
                     st.session_state.peran_user = "Kasir"
+                    catat_log("Login BERHASIL ke dalam sistem.")
                     st.success("Login Kasir Toko Berhasil!")
                     st.rerun()
                 else:
@@ -318,6 +334,7 @@ with col_judul:
 with col_logout:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚪 Keluar (Logout)", use_container_width=True, type="secondary"):
+        catat_log("Keluar (Logout) dari aplikasi.")
         st.session_state.status_login = False
         st.session_state.peran_user = ""
         st.session_state.keranjang = []
@@ -398,17 +415,20 @@ with list_tabs[0]:
                 total_harus_dibayar = int(df_keranjang["Subtotal"].sum())
                 st.metric("Total Belanja", rupiah(total_harus_dibayar))
 
+                # KOREKSI EDIT KERANJANG (Hapus Item Per Baris Spesifik)
                 with st.form("form_hapus_item"):
-                    item_dihapus = st.selectbox("Hapus item dari keranjang", df_keranjang["Nama Barang"].tolist())
-                    submit_hapus = st.form_submit_button("Hapus Item")
+                    item_dihapus = st.selectbox("Batal beli / Hapus item tertentu dari keranjang:", df_keranjang["Nama Barang"].tolist())
+                    submit_hapus = st.form_submit_button("Hapus Item Terpilih", type="secondary")
                     if submit_hapus:
                         st.session_state.keranjang = [i for i in st.session_state.keranjang if i["barang"] != item_dihapus]
+                        catatan_log(f"Menghapus item `{item_dihapus}` dari daftar keranjang belanja.")
                         st.rerun()
 
                 col_reset, col_bayar = st.columns([1, 1.4])
                 with col_reset:
                     if st.button("Kosongkan Keranjang", use_container_width=True):
                         st.session_state.keranjang = []
+                        catatan_log("Mengosongkan seluruh isi keranjang.")
                         st.rerun()
                 with col_bayar:
                     with st.form("form_pembayaran"):
@@ -472,6 +492,7 @@ with list_tabs[1]:
                         }
                         df_baru = pd.concat([df_baru, pd.DataFrame([catatan_pelunasan])], ignore_index=True)
                         simpan_excel(df_baru, FILE_EXCEL)
+                        catatan_log(f"Menerima pelunasan utang dari pembeli `{nama_pelanggan}` sebesar {rupiah(nominal_bayar)}")
                         st.success("Pembayaran utang berhasil disimpan.")
                         st.rerun()
 
@@ -492,7 +513,6 @@ with list_tabs[posisi_tab_gudang]:
             "Harga Satuan": st.column_config.NumberColumn(format="Rp %d"),
         })
 
-        # KOREKSI STOK INSTAN (Hanya untuk Owner)
         if not apakah_kasir:
             st.write("---")
             st.markdown("### ✏️ Edit Harga / Koreksi Jumlah Stok")
@@ -508,6 +528,7 @@ with list_tabs[posisi_tab_gudang]:
                     df_tampil.loc[df_tampil["Nama Barang"] == produk_koreksi, "Harga Satuan"] = int(harga_koreksi)
                     df_tampil.loc[df_tampil["Nama Barang"] == produk_koreksi, "Stok"] = int(stok_koreksi)
                     simpan_excel(df_tampil, FILE_STOK)
+                    catatan_log(f"KOREKSI STOK. Mengubah data `{produk_koreksi}` menjadi Harga: {rupiah(harga_koreksi)}, Stok: {stok_koreksi}")
                     st.success(f"Data fisik untuk `{produk_koreksi}` berhasil disesuaikan!")
                     st.rerun()
 
@@ -523,6 +544,7 @@ with list_tabs[posisi_tab_gudang]:
                     else:
                         df_baru = df_tampil[df_tampil["Nama Barang"] != nama_hapus].reset_index(drop=True)
                         simpan_excel(df_baru, FILE_STOK)
+                        catatan_log(f"Menghapus produk `{nama_hapus}` secara permanen dari sistem rak.")
                         st.success(f"Produk `{nama_hapus}` berhasil dihapus.")
                         st.rerun()
 
@@ -558,11 +580,13 @@ if not apakah_kasir:
                         df_gudang.loc[mask, "Stok"] = pd.to_numeric(df_gudang.loc[mask, "Stok"], errors="coerce").fillna(0).astype(int) + int(jumlah_stok_baru)
                         df_gudang.loc[mask, "Harga Satuan"] = int(harga_jual_baru)
                         simpan_excel(df_gudang, FILE_STOK)
+                        catatan_log(f"Menambah pasokan stok lama untuk `{nama_asli}` sebanyak {jumlah_stok_baru} item.")
                         st.success(f"Produk `{nama_asli}` diperbarui.")
                     else:
                         data_baru = pd.DataFrame([{"Nama Barang": nama_bersih, "Harga Satuan": int(harga_jual_baru), "Stok": int(jumlah_stok_baru)}])
                         df_gudang = pd.concat([df_gudang, data_baru], ignore_index=True)
                         simpan_excel(df_gudang, FILE_STOK)
+                        catatan_log(f"Mendaftarkan BARANG BARU `{nama_bersih}` dengan harga {rupiah(harga_jual_baru)} isi {jumlah_stok_baru} item.")
                         st.success(f"Produk baru `{nama_bersih}` berhasil ditambahkan.")
                     st.rerun()
 
@@ -581,8 +605,26 @@ if not apakah_kasir:
                     st.rerun()
 
         st.write("---")
-        st.markdown("### Laporan Riwayat Bulanan (Arsip Aktif)")
-        st.dataframe(df_transaksi, use_container_width=True)
+        
+        # PENCARIAN RIWAYAT NOTA PINTAR
+        st.markdown("### 🔍 Pelacakan Riwayat Penjualan Lama")
+        kata_kunci_cari = st.text_input("Cari transaksi (Ketik Nama Pembeli / Tanggal / Status Lunas):", placeholder="Misal: Andi / Lunas / 14 Juli")
+        df_pencarian = df_transaksi.copy()
+        
+        if kata_kunci_cari.strip():
+            kunci = kata_kunci_cari.strip().lower()
+            df_pencarian = df_pencarian[
+                df_pencarian["Nama Pembeli"].str.lower().str.contains(kunci) |
+                df_pencarian["Waktu"].str.lower().str.contains(kunci) |
+                df_pencarian["Status"].str.lower().str.contains(kunci)
+            ]
+            
+        st.dataframe(df_pencarian, use_container_width=True, hide_index=True, column_config={
+            "Total Belanja": st.column_config.NumberColumn(format="Rp %d"),
+            "Bayar/DP": st.column_config.NumberColumn(format="Rp %d"),
+            "Kembali": st.column_config.NumberColumn(format="Rp %d"),
+            "Sisa Utang": st.column_config.NumberColumn(format="Rp %d"),
+        })
         
         col_download_1, col_download_2 = st.columns(2)
         with col_download_1:
@@ -593,3 +635,13 @@ if not apakah_kasir:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+            
+        # PENGATURAN LOG AUDIT TOKO
+        st.write("---")
+        st.markdown("### 📋 Log Keamanan Aktivitas Aplikasi (Audit Sistem)")
+        if FILE_LOG.exists():
+            isi_log = FILE_LOG.read_text(encoding="utf-8")
+            st.text_area("Seluruh riwayat klik tombol kasir & owner:", value=isi_log, height=200)
+            if st.button("🔴 Kosongkan Riwayat Log", type="secondary"):
+                FILE_LOG.write_text("=== LOG DIRESET OLEH OWNER ===\n", encoding="utf-8")
+                st.rerun()
